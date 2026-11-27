@@ -2,6 +2,7 @@ import re
 import pytest
 from base64 import b64encode
 from typing import Union, Sequence, List
+from sigma.collection import SigmaCollection
 from sigma.modifiers import (
     SigmaCaseSensitiveModifier,
     SigmaExistsModifier,
@@ -35,6 +36,8 @@ from sigma.modifiers import (
     SigmaTimestampWeekModifier,
     SigmaTimestampMonthModifier,
     SigmaTimestampYearModifier,
+    modifier_mapping,
+    reverse_modifier_mapping,
 )
 from sigma.rule import SigmaDetectionItem
 from sigma.types import (
@@ -284,6 +287,90 @@ def test_wide_noascii(dummy_detection_item):
         SigmaWideModifier(dummy_detection_item, [], SigmaRuleLocation("test.yml")).apply(
             SigmaString("foobär")
         )
+
+
+def test_utf16le_registered_as_wide_alias():
+    """utf16le is the specification name; wide remains the serialized alias."""
+    assert modifier_mapping["utf16le"] is SigmaWideModifier
+    assert modifier_mapping["wide"] is SigmaWideModifier
+    assert reverse_modifier_mapping[SigmaWideModifier.__name__] == "wide"
+
+
+def test_utf16le():
+    assert SigmaDetectionItem.from_mapping("field|utf16le", "*foobar*").value == [
+        SigmaString("*f\x00o\x00o\x00b\x00a\x00r\x00*")
+    ]
+
+
+def test_utf16le_parity_with_wide():
+    utf16le = SigmaDetectionItem.from_mapping("field|utf16le", "*foobar*")
+    wide = SigmaDetectionItem.from_mapping("field|wide", "*foobar*")
+    assert utf16le.modifiers == wide.modifiers == [SigmaWideModifier]
+    assert utf16le.value == wide.value
+    assert utf16le.to_plain() == wide.to_plain() == {"field|wide": "*foobar*"}
+
+
+def test_utf16le_noascii():
+    with pytest.raises(SigmaValueError, match="ascii strings.*test.yml"):
+        SigmaDetectionItem.from_mapping(
+            "field|utf16le", "foobär", source=SigmaRuleLocation("test.yml")
+        )
+
+
+def test_utf16le_base64_parity_with_wide():
+    utf16le = SigmaDetectionItem.from_mapping("field|utf16le|base64", "foobar")
+    wide = SigmaDetectionItem.from_mapping("field|wide|base64", "foobar")
+    assert (
+        utf16le.value
+        == wide.value
+        == [SigmaString(b64encode("foobar".encode("utf-16le")).decode())]
+    )
+
+
+def test_utf16le_base64offset_contains_parity_with_wide():
+    """utf16le|base64offset|contains matches wide (SigmaHQ/pySigma#631)."""
+    utf16le = SigmaDetectionItem.from_mapping("CommandLine|utf16le|base64offset|contains", "ping")
+    wide = SigmaDetectionItem.from_mapping("CommandLine|wide|base64offset|contains", "ping")
+    assert (
+        utf16le.modifiers
+        == wide.modifiers
+        == [
+            SigmaWideModifier,
+            SigmaBase64OffsetModifier,
+            SigmaContainsModifier,
+        ]
+    )
+    assert utf16le.value == wide.value
+    assert (
+        utf16le.to_plain() == wide.to_plain() == {"CommandLine|wide|base64offset|contains": "ping"}
+    )
+
+    (expansion,) = utf16le.value
+    assert isinstance(expansion, SigmaExpansion)
+    data = "ping".encode("utf-16le")
+    for i, variant in enumerate(expansion.values):
+        encoded = str(variant)
+        assert encoded.startswith("*") and encoded.endswith("*")
+        assert encoded[1:-1] in b64encode(i * b"x" + data + b"yyy").decode()
+
+
+def test_utf16le_collection_from_yaml():
+    rule = """title: t
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    sel:
+        CommandLine|utf16le|base64offset|contains: ping
+    condition: sel
+"""
+    parsed = SigmaCollection.from_yaml(rule)
+    wide = SigmaCollection.from_yaml(rule.replace("utf16le", "wide"))
+    assert parsed.errors == []
+    assert (
+        parsed.rules[0].detection.detections["sel"].detection_items[0].value
+        == wide.rules[0].detection.detections["sel"].detection_items[0].value
+    )
 
 
 def test_utf16be(dummy_detection_item):

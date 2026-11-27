@@ -1,5 +1,6 @@
 """Tests for the sigma.matching module."""
 
+from base64 import b64encode
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1167,6 +1168,49 @@ detection:
         assert len(self._match(yaml_str, {"field": "c\x00m\x00d\x00"})) == 1
         assert len(self._match(yaml_str, {"field": "cmd"})) == 0  # not wide-encoded
         assert len(self._match(yaml_str, {"field": "other"})) == 0
+
+    def test_utf16le(self):
+        # utf16le is the specification name for wide (UTF-16LE)
+        yaml_str = """
+title: Test
+name: test
+status: test
+logsource:
+    category: test
+    product: test
+detection:
+    selection:
+        field|utf16le: "cmd"
+    condition: selection
+"""
+        assert len(self._match(yaml_str, {"field": "c\x00m\x00d\x00"})) == 1
+        assert len(self._match(yaml_str, {"field": "cmd"})) == 0
+        assert len(self._match(yaml_str, {"field": "other"})) == 0
+
+    def test_utf16le_base64offset_contains(self):
+        # Same events must match utf16le and its wide alias, including inside a larger field.
+        yaml_str = """
+title: Test
+name: test
+status: test
+logsource:
+    category: test
+    product: test
+detection:
+    selection:
+        field|utf16le|base64offset|contains: "ping"
+    condition: selection
+"""
+        wide_yaml = yaml_str.replace("|utf16le|", "|wide|")
+        data = "ping".encode("utf-16le")
+        encoded = b64encode(data).decode()
+        shifted = b64encode(b"x" + data).decode()
+        assert len(self._match(yaml_str, {"field": f"prefix {encoded} suffix"})) == 1
+        assert len(self._match(wide_yaml, {"field": f"prefix {encoded} suffix"})) == 1
+        assert len(self._match(yaml_str, {"field": shifted})) == 1
+        assert len(self._match(wide_yaml, {"field": shifted})) == 1
+        assert len(self._match(yaml_str, {"field": "ping"})) == 0
+        assert len(self._match(yaml_str, {"field": b64encode(b"ping").decode()})) == 0
 
     def test_utf16be(self):
         # utf16be("ab") == "\x00a\x00b" (big-endian null-prefixed pairs)

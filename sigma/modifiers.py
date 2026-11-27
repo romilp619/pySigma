@@ -340,7 +340,7 @@ class SigmaBase64OffsetModifier(SigmaValueModifier[SigmaString, SigmaExpansion])
 
 
 class SigmaWideModifier(SigmaValueModifier[SigmaString, SigmaString]):
-    """Encode string as wide string (UTF-16LE)."""
+    """Encode string as UTF-16LE (the ``utf16le`` modifier; ``wide`` is its alias)."""
 
     def modify(self, val: SigmaString) -> SigmaString:
         r: list[SigmaStringPartType] = list()
@@ -694,6 +694,9 @@ modifier_mapping: dict[str, Type[SigmaModifier[Any, Any]]] = {
     "s": SigmaRegularExpressionDotAllFlagModifier,
     "startswith": SigmaStartswithModifier,
     "week": SigmaTimestampWeekModifier,
+    # ``utf16le`` is the specification name and ``wide`` is its alias. ``wide`` stays last so
+    # reverse_modifier_mapping keeps serializing this modifier as ``wide``.
+    "utf16le": SigmaWideModifier,
     "wide": SigmaWideModifier,
     "windash": SigmaWindowsDashModifier,
     "year": SigmaTimestampYearModifier,
