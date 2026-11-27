@@ -1,12 +1,12 @@
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Iterator
 from sigma.modifiers import (
     SigmaContainsModifier,
     SigmaEndswithModifier,
     SigmaStartswithModifier,
 )
 from sigma.rule import SigmaDetectionItem
-from sigma.types import SigmaString, SigmaType, SpecialChars
+from sigma.types import SigmaExpansion, SigmaString, SigmaType, SpecialChars
 from sigma.validators.base import (
     SigmaDetectionItemValidator,
     SigmaStringValueValidator,
@@ -180,3 +180,144 @@ class EscapedWildcardValidator(SigmaStringValueValidator):
             return [EscapedWildcardIssue([self.rule], value)]
         else:
             return []
+
+
+# Partial-match modifiers turn an empty value or a single path separator into a match
+# against almost every Windows or Unix path.
+_PARTIAL_MATCH_MODIFIERS = (
+    SigmaContainsModifier,
+    SigmaEndswithModifier,
+    SigmaStartswithModifier,
+)
+_TAUTOLOGICAL_LITERALS = frozenset(("", "\\", "/"))
+
+
+def _iter_strings(value: SigmaType) -> Iterator[SigmaString]:
+    """Yield strings contained in a value, including strings nested in expansions."""
+    if isinstance(value, SigmaString):
+        yield value
+    elif isinstance(value, SigmaExpansion):
+        for item in value.values:
+            yield from _iter_strings(item)
+
+
+def _plain_literal(value: SigmaString) -> str | None:
+    """Return literal characters, ignoring wildcards.
+
+    Placeholders make the matched text unknown, so those values are skipped.
+    """
+    parts: list[str] = []
+    for part in value.s:
+        if isinstance(part, str):
+            parts.append(part)
+        elif isinstance(part, SpecialChars):
+            continue
+        else:
+            return None
+    return "".join(parts)
+
+
+def _is_unmodified_tautology(value: SigmaString) -> bool:
+    """True when escape parsing leaves an empty string or exactly one path separator."""
+    if any(not isinstance(part, str) for part in value.s):
+        return False
+    return _plain_literal(value) in _TAUTOLOGICAL_LITERALS
+
+
+def _without_partial_match_wildcards(
+    value: SigmaString, detection_item: SigmaDetectionItem
+) -> list[str] | None:
+    """Literal parts after dropping wildcards added by contains, startswith or endswith.
+
+    Returns None when a placeholder or an author wildcard remains. Those values are not
+    an empty string or a single path separator.
+    """
+    parts: list[str | SpecialChars] = []
+    for part in value.s:
+        if isinstance(part, (str, SpecialChars)):
+            parts.append(part)
+        else:
+            return None
+    modifiers = detection_item.modifiers
+    if (
+        (SigmaContainsModifier in modifiers or SigmaEndswithModifier in modifiers)
+        and parts
+        and parts[0] == SpecialChars.WILDCARD_MULTI
+    ):
+        del parts[0]
+    if (
+        (SigmaContainsModifier in modifiers or SigmaStartswithModifier in modifiers)
+        and parts
+        and parts[-1] == SpecialChars.WILDCARD_MULTI
+    ):
+        del parts[-1]
+    if any(not isinstance(part, str) for part in parts):
+        return None
+    return [part for part in parts if isinstance(part, str)]
+
+
+@dataclass
+class EmptyOrPathSeparatorIssue(SigmaValidationIssue):
+    description: ClassVar[str] = (
+        "contains, startswith or endswith is empty or one separator and matches nearly all values"
+    )
+    severity: ClassVar[SigmaValidationIssueSeverity] = SigmaValidationIssueSeverity.HIGH
+    string: SigmaString
+
+
+class EmptyOrPathSeparatorValidator(SigmaDetectionItemValidator):
+    """Flag contains, startswith and endswith values that match almost everything.
+
+    SigmaString parses a pair of backslashes into one literal backslash. Combined with
+    contains, startswith or endswith, that value matches almost every Windows path, and a
+    single slash does the same for slash-separated paths. An empty string matches every
+    value. Exact matches and longer fragments such as ``\\Users\\`` are not reported.
+    Modifiers that rewrite the value first, such as base64 or wide, are ignored, because
+    the matched text is no longer a path separator. Negated values are not reported,
+    because they do not match everything.
+    """
+
+    def validate_detection_item(
+        self, detection_item: SigmaDetectionItem
+    ) -> list[SigmaValidationIssue]:
+        if detection_item.negated or not any(
+            modifier in detection_item.modifiers for modifier in _PARTIAL_MATCH_MODIFIERS
+        ):
+            return []
+        if detection_item.original_value is None:
+            return self._validate_without_original(detection_item)
+
+        final_literals = {
+            literal
+            for value in detection_item.value
+            for string in _iter_strings(value)
+            if (literal := _plain_literal(string)) is not None
+        }
+        issues: list[SigmaValidationIssue] = []
+        for value in detection_item.original_value:
+            if not isinstance(value, SigmaString) or not _is_unmodified_tautology(value):
+                continue
+            # Rewriting modifiers replace the author value. Report it only when a matched
+            # literal is still empty or that same single separator.
+            if _plain_literal(value) not in final_literals:
+                continue
+            issues.append(EmptyOrPathSeparatorIssue([self.rule], value))
+        return issues
+
+    def _validate_without_original(
+        self, detection_item: SigmaDetectionItem
+    ) -> list[SigmaValidationIssue]:
+        """Check values after modifiers when the pre-modifier copy is no longer available."""
+        issues: list[SigmaValidationIssue] = []
+        for value in detection_item.value:
+            for string in _iter_strings(value):
+                parts = _without_partial_match_wildcards(string, detection_item)
+                if parts is None:
+                    continue
+                literal = "".join(parts)
+                if literal not in _TAUTOLOGICAL_LITERALS:
+                    continue
+                reduced = SigmaString()
+                reduced.s = list(parts)
+                issues.append(EmptyOrPathSeparatorIssue([self.rule], reduced))
+        return issues

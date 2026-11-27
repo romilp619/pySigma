@@ -1,6 +1,7 @@
 import pytest
 from sigma.rule import SigmaDetectionItem, SigmaLogSource, SigmaRule
 from sigma.types import SigmaString
+from sigma.validators.core import validators as core_validators
 from sigma.validators.core.logsources import (
     SpecificInsteadOfGenericLogsourceValidator,
     SpecificInsteadOfGenericLogsourceIssue,
@@ -10,6 +11,8 @@ from sigma.validators.core.values import (
     ControlCharacterValidator,
     DoubleWildcardIssue,
     DoubleWildcardValidator,
+    EmptyOrPathSeparatorIssue,
+    EmptyOrPathSeparatorValidator,
     NumberAsStringIssue,
     NumberAsStringValidator,
     WildcardInsteadOfEndswithIssue,
@@ -424,3 +427,134 @@ def test_validator_escaped_wildcard_valid():
 def test_validator_escaped_wildcard_correlation_rule(correlation_rule):
     validator = EscapedWildcardValidator()
     assert validator.validate(correlation_rule) == []
+
+
+def _selection_rule(selection):
+    """Build a rule whose only detection is ``sel``."""
+    return SigmaRule.from_dict(
+        {
+            "title": "Test",
+            "status": "test",
+            "logsource": {"category": "test"},
+            "detection": {"sel": selection, "condition": "sel"},
+        }
+    )
+
+
+def _separator_issues(rule, raw_values):
+    """Issues for author strings that reduce to an empty value or one path separator."""
+    return [EmptyOrPathSeparatorIssue([rule], SigmaString(value)) for value in raw_values]
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected"),
+    [
+        # SigmaString("\\\\") is one literal backslash. The neighbouring path fragment is not.
+        ({"CallTrace|contains": ["\\Users\\", "\\\\"]}, ["\\\\"]),
+        ({"field|contains": "\\\\"}, ["\\\\"]),
+        # A single trailing backslash also collapses to one literal backslash.
+        ({"field|contains": "\\"}, ["\\\\"]),
+        ({"field|startswith": "\\\\"}, ["\\\\"]),
+        ({"field|endswith": "\\\\"}, ["\\\\"]),
+        ({"field|contains": "/"}, ["/"]),
+        ({"field|startswith": "/"}, ["/"]),
+        ({"field|endswith": "/"}, ["/"]),
+        ({"field|contains": ""}, [""]),
+        ({"field|startswith": ""}, [""]),
+        ({"field|endswith": ""}, [""]),
+        ({"|contains": "\\\\"}, ["\\\\"]),
+        ({"field|contains|all": ["\\\\", "/"]}, ["\\\\", "/"]),
+        ({"field|contains": "\\\\", "exact": "\\\\"}, ["\\\\"]),
+        # Placeholders are not literals; the lone backslash next to one still is.
+        ({"field|expand|contains": ["\\\\", "%name%"]}, ["\\\\"]),
+    ],
+)
+def test_validator_empty_or_path_separator(selection, expected):
+    validator = EmptyOrPathSeparatorValidator()
+    rule = _selection_rule(selection)
+    assert validator.validate(rule) == _separator_issues(rule, expected)
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"field|contains": "\\Users\\"},
+        {"field|contains": "/usr/bin/"},
+        {"field|startswith": "C:\\Users\\"},
+        {"field|endswith": "\\cmd.exe"},
+        {"field|contains": "Users"},
+        {"field|contains": "a\\b"},
+        # Two literal backslashes are a real fragment (for example a UNC prefix).
+        {"field|contains": "\\\\\\\\"},
+        # Exact matches of the same characters are not partial-match tautologies.
+        {"field": "\\\\"},
+        {"field": "/"},
+        {"field": ""},
+        # Author wildcards are not an empty string.
+        {"field|contains": "*"},
+        {"field|contains": "*\\Users\\*"},
+        {"field|contains": "\\\\*"},
+        {"field|re": "\\\\"},
+        # Negation does not match everything.
+        {"field|contains|neq": "\\\\"},
+        # Encoding modifiers rewrite the separator before it is matched.
+        {"field|base64|contains": "\\\\"},
+        {"field|base64offset|contains": "\\\\"},
+        {"field|wide|contains": "\\\\"},
+        {"field|windash|contains": "-param"},
+    ],
+)
+def test_validator_empty_or_path_separator_valid(selection):
+    validator = EmptyOrPathSeparatorValidator()
+    assert validator.validate(_selection_rule(selection)) == []
+
+
+def test_validator_empty_or_path_separator_yaml_spellings():
+    # Single-quoted YAML keeps backslashes literal, and SigmaString then collapses
+    # each pair. The values are the fragment \Users\, two literal backslashes,
+    # one literal backslash, a slash, an empty string, and /usr/bin/. Only the
+    # one-backslash, slash, and empty values are flagged.
+    validator = EmptyOrPathSeparatorValidator()
+    rule = SigmaRule.from_yaml("""
+        title: Test
+        status: test
+        logsource:
+            category: test
+        detection:
+            sel:
+                CallTrace|contains:
+                    - '\\\\Users\\\\'
+                    - '\\\\\\\\'
+                    - '\\\\'
+                    - '/'
+                    - ''
+                    - '/usr/bin/'
+            condition: sel
+        """)
+    assert validator.validate(rule) == _separator_issues(rule, ["\\\\", "/", ""])
+
+
+def test_validator_empty_or_path_separator_without_original_value():
+    validator = EmptyOrPathSeparatorValidator()
+    rule = _selection_rule({"field|contains": "\\\\", "field|endswith": ""})
+    for detection in rule.detection.detections.values():
+        for item in detection.detection_items:
+            if isinstance(item, SigmaDetectionItem):
+                item.disable_conversion_to_plain()
+    assert validator.validate(rule) == _separator_issues(rule, ["\\\\", ""])
+
+
+def test_validator_empty_or_path_separator_windash_keeps_separator():
+    # windash leaves a lone backslash unchanged but wraps it in an expansion.
+    validator = EmptyOrPathSeparatorValidator()
+    rule = _selection_rule({"field|windash|contains": "\\\\"})
+    assert validator.validate(rule) == _separator_issues(rule, ["\\\\"])
+
+
+def test_validator_empty_or_path_separator_correlation_rule(correlation_rule):
+    validator = EmptyOrPathSeparatorValidator()
+    assert validator.validate(correlation_rule) == []
+
+
+def test_validator_empty_or_path_separator_registered():
+    assert core_validators["empty_or_path_separator"] is EmptyOrPathSeparatorValidator

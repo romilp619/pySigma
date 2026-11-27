@@ -273,6 +273,9 @@ Check detection values for potential issues.
    * - ``EscapedWildcardValidator``
      - ``escaped_wildcard``
      - Detects escaped wildcards (``\*`` or ``\?``) in rule logic.
+   * - ``EmptyOrPathSeparatorValidator``
+     - ``empty_or_path_separator``
+     - Detects empty or single path-separator values used with ``contains``, ``startswith`` or ``endswith``. These match almost every value.
 
 Log Source Validators (``sigma.validators.core.logsources``)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
